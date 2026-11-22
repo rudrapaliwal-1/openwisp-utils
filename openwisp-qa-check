@@ -189,12 +189,12 @@ runcheckpendingmigrations() {
   if [ ! -f "./tests/manage.py" ]; then
     echo "File manage.py not found, skipping Make Migration Check."
   else
-    OUTPUT=$(python tests/manage.py makemigrations --dry-run $MODULE)
-    echo $OUTPUT | grep "No changes detected" &>/dev/null &&
+    local modules=()
+    read -r -a modules <<< "$MODULE"
+    python -m openwisp_utils.qa_migrations tests/manage.py "${modules[@]}" &&
       echo "SUCCESS: Migrations check successful!" ||
       {
-        echo $OUTPUT
-        echoerr "ERROR: Migrations check failed! Models' changes not migrated, please run './manage.py makemigrations' to solve the issue!"
+        echoerr "ERROR: Migrations check failed! If model changes need migrations, run './manage.py makemigrations'."
         FAILURE=1
       }
   fi

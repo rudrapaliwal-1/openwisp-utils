@@ -1,7 +1,11 @@
 import os
+import sqlite3
 import subprocess
+import sys
 import tempfile
+from contextlib import closing
 from os import path
+from pathlib import Path
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -26,6 +30,96 @@ class TestQa(TestCase):
     def tearDown(self):
         os.unlink(self._test_migration_file)
         os.unlink(self._test_rst_file)
+
+    def test_pending_migrations_use_isolated_databases(self):
+        repo = Path(__file__).resolve().parents[3]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+            tests_dir = project / "tests"
+            tests_dir.mkdir()
+            (tests_dir / "manage.py").write_text(
+                (repo / "tests" / "manage.py").read_text()
+            )
+            app = tests_dir / "qa_app"
+            migrations = app / "migrations"
+            migrations.mkdir(parents=True)
+            for package in (tests_dir / "openwisp2", app, migrations):
+                package.mkdir(exist_ok=True)
+                (package / "__init__.py").touch()
+            (app / "models.py").write_text(
+                "from django.db import models\n\n"
+                "class Item(models.Model):\n"
+                "    name = models.CharField(max_length=20)\n"
+            )
+            (tests_dir / "openwisp2" / "settings.py").write_text(
+                "INSTALLED_APPS = ['django.contrib.contenttypes', 'qa_app']\n"
+                "SECRET_KEY = 'test-key'\n"
+                "DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'\n"
+                "DATABASE_ROUTERS = ['openwisp2.settings.Router']\n"
+                "DATABASES = {alias: {'ENGINE': 'django.db.backends.sqlite3', "
+                "'NAME': f'{alias}.sqlite3'} for alias in ('default', 'other')}\n"
+                "class Router:\n"
+                "    def allow_migrate(self, db, app_label, **hints):\n"
+                "        return True\n"
+            )
+            original_databases = {}
+            for alias in ("default", "other"):
+                database = project / f"{alias}.sqlite3"
+                with closing(sqlite3.connect(database)) as connection:
+                    connection.execute(
+                        "CREATE TABLE django_migrations "
+                        "(id INTEGER PRIMARY KEY, app VARCHAR(255), "
+                        "name VARCHAR(255), applied DATETIME)"
+                    )
+                    connection.execute(
+                        "INSERT INTO django_migrations (app, name, applied) "
+                        "VALUES ('contenttypes', '0002_remove_content_type_name', "
+                        "CURRENT_TIMESTAMP)"
+                    )
+                    connection.commit()
+                original_databases[database] = database.read_bytes()
+
+            env = os.environ.copy()
+            env.pop("DJANGO_SETTINGS_MODULE", None)
+            env["PYTHONPATH"] = str(repo)
+            env["PATH"] = os.pathsep.join(
+                (str(Path(sys.executable).parent), env["PATH"])
+            )
+            kwargs = dict(cwd=project, env=env, capture_output=True, text=True)
+            baseline = subprocess.run(
+                [sys.executable, "tests/manage.py", "makemigrations", "--dry-run"],
+                **kwargs,
+            )
+            self.assertEqual(baseline.returncode, 1, baseline.stdout + baseline.stderr)
+            self.assertIn("InconsistentMigrationHistory", baseline.stderr)
+
+            qa_check = [
+                str(repo / "openwisp-qa-check"),
+                "--skip-checkendline",
+                "--skip-checkmigrations",
+                "--skip-flake8",
+                "--skip-isort",
+                "--skip-black",
+                "--skip-checkrst",
+                "--skip-checkcommit",
+                "--migration-module",
+            ]
+            with self.subTest("Existing migration history is isolated"):
+                result = subprocess.run([*qa_check, "contenttypes"], **kwargs)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Migrations check successful", result.stdout)
+
+            with self.subTest("Missing migrations still fail QA"):
+                result = subprocess.run([*qa_check, "contenttypes qa_app"], **kwargs)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("Create model Item", result.stdout)
+                self.assertIn("Migrations check failed", result.stderr)
+                self.assertNotIn("InconsistentMigrationHistory", result.stderr)
+                self.assertEqual(
+                    list(migrations.glob("*.py")), [migrations / "__init__.py"]
+                )
+            for database, original in original_databases.items():
+                self.assertEqual(database.read_bytes(), original, str(database))
 
     def test_qa_call_check_migration_name_pass(self):
         options = [

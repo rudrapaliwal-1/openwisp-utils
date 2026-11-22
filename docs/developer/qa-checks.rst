@@ -201,12 +201,13 @@ Ensures that a blank line is kept at the end of each file.
 ``checkpendingmigrations``
 --------------------------
 
-Ensures there django migrations are up to date and no new migrations need
-to be created.
+Checks that the Django models have no changes that require new migrations.
+The check loads the project's test settings through ``tests/manage.py``
+and uses temporary in-memory SQLite databases so the result is independent
+of the project's existing database and migration history.
 
-It accepts an optional ``--migration-module`` flag indicating the django
-app name that should be passed to ``./manage.py makemigrations``, e.g.:
-``./manage.py makemigrations $MIGRATION_MODULE``.
+Use the optional ``--migration-module`` flag to pass one or more Django
+app labels to ``makemigrations``.
 
 .. _utils_checkrst:
 
